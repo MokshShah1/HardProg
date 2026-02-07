@@ -296,6 +296,45 @@ static int countCommas(const char *s)
     return c;
 }
 
+static void appendText(char **dst, size_t *cap, const char *src)
+{
+    if (*dst == NULL)
+    {
+        failNow("out of memory");
+    }
+    if (*cap == 0)
+    {
+        *cap = 128;
+        char *b = (char *)realloc(*dst, *cap);
+        if (b == NULL)
+        {
+            failNow("out of memory");
+        }
+        *dst = b;
+        (*dst)[0] = '\0';
+    }
+
+    size_t cur = strlen(*dst);
+    size_t add = strlen(src);
+    size_t need = cur + add + 1;
+
+    if (need > *cap)
+    {
+        while (need > *cap)
+        {
+            *cap *= 2;
+        }
+        char *bigger = (char *)realloc(*dst, *cap);
+        if (bigger == NULL)
+        {
+            failNow("out of memory");
+        }
+        *dst = bigger;
+    }
+
+    memcpy(*dst + cur, src, add + 1);
+}
+
 typedef struct
 {
     char *name;
@@ -320,7 +359,14 @@ static void rememberMark(MarkTable *t, const char *name, uint64_t addr)
     }
     if (t->count == t->cap)
     {
-        t->cap = (t->cap != 0) ? (t->cap * 2) : 64;
+        if (t->cap == 0)
+        {
+            t->cap = 64;
+        }
+        else
+        {
+            t->cap *= 2;
+        }
         t->items = (NamedMark *)realloc(t->items, t->cap * sizeof(NamedMark));
         if (t->items == NULL)
         {
@@ -394,7 +440,14 @@ static void addLine(Program *p, ProgramLine line)
 {
     if (p->count == p->cap)
     {
-        p->cap = (p->cap != 0) ? (p->cap * 2) : 64;
+        if (p->cap == 0)
+        {
+            p->cap = 64;
+        }
+        else
+        {
+            p->cap *= 2;
+        }
         p->lines = (ProgramLine *)realloc(p->lines, p->cap * sizeof(ProgramLine));
         if (p->lines == NULL)
         {
@@ -446,7 +499,15 @@ static void emitLoadMacro(Program *prog, uint64_t *pc, int rd, uint64_t imm)
         }
         {
             char buf[64];
-            uint64_t val = (i == 4) ? (imm & 0xFULL) : ((imm >> offs[i]) & 0xFFFULL);
+            uint64_t val;
+            if (i == 4)
+            {
+                val = imm & 0xFULL;
+            }
+            else
+            {
+                val = (imm >> offs[i]) & 0xFFFULL;
+            }
             snprintf(buf, sizeof(buf), "addi r%d, %llu", rd, (unsigned long long)val);
             addLine(prog, (ProgramLine){.kind = LINE_INSTR, .addr = *pc, .text = dupText(buf)});
             *pc += 4;
@@ -535,36 +596,17 @@ static char *normalizeInstructionKeepMarks(const char *line)
     }
     out[0] = '\0';
 
-#define APPEND_TEXT(S)                             \
-    do                                             \
-    {                                              \
-        size_t need = strlen(out) + strlen(S) + 1; \
-        if (need > cap)                            \
-        {                                          \
-            while (need > cap)                     \
-            {                                      \
-                cap *= 2;                          \
-            }                                      \
-            out = (char *)realloc(out, cap);       \
-            if (out == NULL)                       \
-            {                                      \
-                freeWordList(&w);                  \
-                failNow("out of memory");          \
-            }                                      \
-        }                                          \
-        strcat(out, (S));                          \
-    } while (0)
+    appendText(&out, &cap, w.words[0]);
 
-    APPEND_TEXT(w.words[0]);
     for (int i = 1; i < w.count; i++)
     {
         if (i == 1)
         {
-            APPEND_TEXT(" ");
+            appendText(&out, &cap, " ");
         }
         else
         {
-            APPEND_TEXT(", ");
+            appendText(&out, &cap, ", ");
         }
 
         const char *tok = w.words[i];
@@ -585,10 +627,10 @@ static char *normalizeInstructionKeepMarks(const char *line)
             toUnsignedDecimal(tok, buf, sizeof(buf));
             emit = buf;
         }
-        APPEND_TEXT(emit);
+
+        appendText(&out, &cap, emit);
     }
 
-#undef APPEND_TEXT
     freeWordList(&w);
     return out;
 }
@@ -1000,37 +1042,17 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
         }
         s[0] = '\0';
 
-#define APPEND_OUT(SRC)                            \
-    do                                             \
-    {                                              \
-        size_t need = strlen(s) + strlen(SRC) + 1; \
-        if (need > cap)                            \
-        {                                          \
-            while (need > cap)                     \
-            {                                      \
-                cap *= 2;                          \
-            }                                      \
-            s = (char *)realloc(s, cap);           \
-            if (s == NULL)                         \
-            {                                      \
-                freeWordList(&w);                  \
-                failNow("out of memory");          \
-            }                                      \
-        }                                          \
-        strcat(s, (SRC));                          \
-    } while (0)
-
-        APPEND_OUT(w.words[0]);
+        appendText(&s, &cap, w.words[0]);
 
         for (int k = 1; k < w.count; k++)
         {
             if (k == 1)
             {
-                APPEND_OUT(" ");
+                appendText(&s, &cap, " ");
             }
             else
             {
-                APPEND_OUT(", ");
+                appendText(&s, &cap, ", ");
             }
 
             const char *tok = w.words[k];
@@ -1079,10 +1101,9 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
                 emit = buf;
             }
 
-            APPEND_OUT(emit);
+            appendText(&s, &cap, emit);
         }
 
-#undef APPEND_OUT
         freeWordList(&w);
 
         addLine(&out, (ProgramLine){.kind = LINE_INSTR, .addr = pc, .text = s});
