@@ -622,7 +622,7 @@ static char *readLabelName(const char *line)
     return name;
 }
 
-static int expectedCommaCountForMnemonic(const char *mnemonic, int tokenCount)
+static int expectedCommaCountForMnemonic(const char *mnemonic, int tokenCount __attribute__((unused)))
 {
     if (mnemonic == NULL)
     {
