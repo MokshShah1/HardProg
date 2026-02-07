@@ -367,7 +367,6 @@ typedef enum
 typedef enum
 {
     LINE_DIR,
-    LINE_LABEL,
     LINE_INSTR,
     LINE_DATA,
     LINE_LD_MARK
@@ -612,7 +611,6 @@ static char *readLabelName(const char *line)
     {
         p++;
     }
-    p = skipSpaces(p);
     if (*p != '\0')
     {
         failNow("malformed label token");
@@ -723,18 +721,6 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
         {
             char *name = readLabelName(p);
             rememberMark(marks, name, pc);
-
-            char *lbl = (char *)malloc(strlen(name) + 2);
-            if (lbl == NULL)
-            {
-                free(name);
-                fclose(f);
-                failNow("out of memory");
-            }
-            lbl[0] = ':';
-            memcpy(lbl + 1, name, strlen(name) + 1);
-            addLine(outLines, (ProgramLine){.kind = LINE_LABEL, .addr = pc, .text = lbl});
-
             free(name);
             continue;
         }
@@ -951,12 +937,6 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
         if (it->kind == LINE_DIR)
         {
             addLine(&out, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = it->dirArea});
-            continue;
-        }
-
-        if (it->kind == LINE_LABEL)
-        {
-            addLine(&out, (ProgramLine){.kind = LINE_LABEL, .addr = pc, .text = dupText(it->text)});
             continue;
         }
 
@@ -1607,12 +1587,6 @@ static void writeIntermediateFile(const char *path, const Program *prog)
             continue;
         }
 
-        if (it->kind == LINE_LABEL)
-        {
-            fprintf(f, "%s\n", it->text);
-            continue;
-        }
-
         if (it->kind == LINE_DATA)
         {
             fprintf(f, "\t%llu\n", (unsigned long long)it->data);
@@ -1620,6 +1594,37 @@ static void writeIntermediateFile(const char *path, const Program *prog)
         else if (it->kind == LINE_INSTR)
         {
             fprintf(f, "\t%s\n", it->text);
+        }
+    }
+
+    fclose(f);
+}
+
+static void writeBinaryFile(const char *path, const Program *prog, const uint32_t *words)
+{
+    FILE *f = fopen(path, "wb");
+    if (f == NULL)
+    {
+        failNowFmt("cannot open binary output file: %s", path);
+    }
+
+    size_t wi = 0;
+    for (size_t i = 0; i < prog->count; i++)
+    {
+        const ProgramLine *it = &prog->lines[i];
+
+        if (it->kind == LINE_DIR)
+        {
+            continue;
+        }
+
+        if (it->kind == LINE_DATA)
+        {
+            writeU64LE(f, it->data);
+        }
+        else if (it->kind == LINE_INSTR)
+        {
+            writeU32LE(f, words[wi++]);
         }
     }
 
@@ -1658,37 +1663,6 @@ static uint32_t *preassembleAll(const Program *prog, size_t *outCount)
 
     *outCount = n;
     return arr;
-}
-
-static void writeBinaryFile(const char *path, const Program *prog, const uint32_t *words)
-{
-    FILE *f = fopen(path, "wb");
-    if (f == NULL)
-    {
-        failNowFmt("cannot open binary output file: %s", path);
-    }
-
-    size_t wi = 0;
-    for (size_t i = 0; i < prog->count; i++)
-    {
-        const ProgramLine *it = &prog->lines[i];
-
-        if (it->kind == LINE_DIR || it->kind == LINE_LABEL)
-        {
-            continue;
-        }
-
-        if (it->kind == LINE_DATA)
-        {
-            writeU64LE(f, it->data);
-        }
-        else if (it->kind == LINE_INSTR)
-        {
-            writeU32LE(f, words[wi++]);
-        }
-    }
-
-    fclose(f);
 }
 
 int main(int argc, char **argv)
