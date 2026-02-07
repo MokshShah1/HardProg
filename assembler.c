@@ -595,17 +595,21 @@ static char *normalizeInstructionKeepMarks(const char *line)
 
 static char *readLabelName(const char *line)
 {
-    const char *p = skipSpaces(line);
-    if (*p != ':')
+    if (line == NULL || line[0] != ':')
     {
         failNow("internal: expected ':' label");
     }
-    p++;
-    p = skipSpaces(p);
+    const char *p = line + 1;
+
+    if (*p == '\0' || isspace((unsigned char)*p) != 0)
+    {
+        failNow("malformed label token");
+    }
     if (!(isalpha((unsigned char)*p) != 0 || *p == '_' || *p == '.'))
     {
         failNow("malformed label name");
     }
+
     const char *start = p;
     while (*p != '\0' && (isalnum((unsigned char)*p) != 0 || *p == '_' || *p == '.'))
     {
@@ -615,6 +619,7 @@ static char *readLabelName(const char *line)
     {
         failNow("malformed label token");
     }
+
     size_t len = (size_t)(p - start);
     char *name = (char *)malloc(len + 1);
     if (name == NULL)
