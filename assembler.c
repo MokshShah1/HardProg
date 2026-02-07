@@ -6,7 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 
-#define BASE_ADDR 0x1000ULL
+#define BASE_ADDR 0ULL
 #define LD_MACRO_INSTRS 12
 #define LD_MACRO_BYTES (LD_MACRO_INSTRS * 4)
 
@@ -67,6 +67,18 @@ static const char *skipSpaces(const char *s)
 static bool beginsWith(const char *s, const char *prefix)
 {
     return strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+static bool isAllSpace(const char *s)
+{
+    for (const char *p = s; *p != '\0'; p++)
+    {
+        if (isspace((unsigned char)*p) == 0)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void writeU32LE(FILE *f, uint32_t x)
@@ -457,7 +469,7 @@ static void emitClearMacro(Program *prog, uint64_t *pc, int rd)
 
 static void emitHaltMacro(Program *prog, uint64_t *pc)
 {
-    addLine(prog, (ProgramLine){.kind = LINE_INSTR, .addr = *pc, .text = dupText("trap 0")});
+    addLine(prog, (ProgramLine){.kind = LINE_INSTR, .addr = *pc, .text = dupText("priv r0, r0, r0, 0")});
     *pc += 4;
 }
 
@@ -647,11 +659,12 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
         cutLineAtSemicolon(line);
         trimRight(line);
 
-        const char *p = skipSpaces(line);
-        if (*p == '\0')
+        if (line[0] == '\0' || isAllSpace(line) == true)
         {
             continue;
         }
+
+        const char *p = line;
 
         if (beginsWith(p, ".code"))
         {
@@ -847,11 +860,7 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
             const char *rhs = w.words[2];
             if (rhs[0] == ':' && rhs[1] != '\0')
             {
-                addLine(outLines, (ProgramLine){
-                                      .kind = LINE_LD_MARK,
-                                      .addr = pc,
-                                      .ldTarget = rd,
-                                      .ldName = dupText(rhs + 1)});
+                addLine(outLines, (ProgramLine){.kind = LINE_LD_MARK, .addr = pc, .ldTarget = rd, .ldName = dupText(rhs + 1)});
                 pc += LD_MACRO_BYTES;
                 freeWordList(&w);
                 continue;
@@ -1044,22 +1053,6 @@ static uint32_t assembleOne(const char *instr)
     int rt = -1;
     uint32_t u12 = 0;
     int32_t i12 = 0;
-
-    if (strcmp(mn, "trap") == 0)
-    {
-        if (w.count != 2)
-        {
-            freeWordList(&w);
-            failNow("trap expects L");
-        }
-        if (readU12(w.words[1], &u12) == false)
-        {
-            freeWordList(&w);
-            failNow("trap imm must be 0..4095");
-        }
-        freeWordList(&w);
-        return packPriv(0x0f, 0, 0, 0, u12);
-    }
 
     if (strcmp(mn, "and") == 0 || strcmp(mn, "or") == 0 || strcmp(mn, "xor") == 0 ||
         strcmp(mn, "add") == 0 || strcmp(mn, "sub") == 0 || strcmp(mn, "mul") == 0 || strcmp(mn, "div") == 0 ||
