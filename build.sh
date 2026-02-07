@@ -1,0 +1,1 @@
+gcc -std=c11 -O2 -Wall -Wextra -Werror assembler.c -o hw3
