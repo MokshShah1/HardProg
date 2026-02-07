@@ -611,6 +611,10 @@ static char *readLabelName(const char *line)
     {
         p++;
     }
+    if (*p != '\0')
+    {
+        failNow("malformed label token");
+    }
     size_t len = (size_t)(p - start);
     char *name = (char *)malloc(len + 1);
     if (name == NULL)
@@ -1023,7 +1027,7 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
                     free(s);
                     failNowFmt("undefined label reference: %s", tok + 1);
                 }
-                long long rel = (long long)((int64_t)addr - (int64_t)pc);
+                long long rel = (long long)((int64_t)addr - (int64_t)(pc + 4));
                 if (rel < -2048LL || rel > 2047LL)
                 {
                     freeWordList(&w);
@@ -1426,6 +1430,12 @@ static uint32_t assembleOne(const char *instr)
                 freeWordList(&w);
                 failNow("mov store: malformed imm");
             }
+            p++;
+            if (*p != '\0')
+            {
+                freeWordList(&w);
+                failNow("mov store: trailing junk");
+            }
 
             int base = readRegister(regbuf);
             int32_t imm = 0;
@@ -1497,6 +1507,12 @@ static uint32_t assembleOne(const char *instr)
             {
                 freeWordList(&w);
                 failNow("mov load: malformed imm");
+            }
+            p++;
+            if (*p != '\0')
+            {
+                freeWordList(&w);
+                failNow("mov load: trailing junk");
             }
 
             int base = readRegister(regbuf);
@@ -1584,7 +1600,7 @@ static void writeIntermediateFile(const char *path, const Program *prog)
     fclose(f);
 }
 
-static void writeBinaryFile(const char *path, const Program *prog)
+static void writeBinaryFile(const char *path, const Program *prog, const uint32_t *words)
 {
     FILE *f = fopen(path, "wb");
     if (f == NULL)
@@ -1592,6 +1608,7 @@ static void writeBinaryFile(const char *path, const Program *prog)
         failNowFmt("cannot open binary output file: %s", path);
     }
 
+    size_t wi = 0;
     for (size_t i = 0; i < prog->count; i++)
     {
         const ProgramLine *it = &prog->lines[i];
@@ -1607,12 +1624,45 @@ static void writeBinaryFile(const char *path, const Program *prog)
         }
         else if (it->kind == LINE_INSTR)
         {
-            uint32_t word = assembleOne(it->text);
-            writeU32LE(f, word);
+            writeU32LE(f, words[wi++]);
         }
     }
 
     fclose(f);
+}
+
+static uint32_t *preassembleAll(const Program *prog, size_t *outCount)
+{
+    size_t cap = 128;
+    size_t n = 0;
+    uint32_t *arr = (uint32_t *)malloc(sizeof(uint32_t) * cap);
+    if (arr == NULL)
+    {
+        failNow("out of memory");
+    }
+
+    for (size_t i = 0; i < prog->count; i++)
+    {
+        const ProgramLine *it = &prog->lines[i];
+        if (it->kind != LINE_INSTR)
+        {
+            continue;
+        }
+        uint32_t w = assembleOne(it->text);
+        if (n == cap)
+        {
+            cap *= 2;
+            arr = (uint32_t *)realloc(arr, sizeof(uint32_t) * cap);
+            if (arr == NULL)
+            {
+                failNow("out of memory");
+            }
+        }
+        arr[n++] = w;
+    }
+
+    *outCount = n;
+    return arr;
 }
 
 int main(int argc, char **argv)
@@ -1633,9 +1683,13 @@ int main(int argc, char **argv)
     buildFirstPass(inputPath, &first, &marks);
     Program finalProg = buildFinalProgram(&first, &marks);
 
-    writeIntermediateFile(intermediatePath, &finalProg);
-    writeBinaryFile(binaryPath, &finalProg);
+    size_t wordCount = 0;
+    uint32_t *words = preassembleAll(&finalProg, &wordCount);
 
+    writeIntermediateFile(intermediatePath, &finalProg);
+    writeBinaryFile(binaryPath, &finalProg, words);
+
+    free(words);
     freeProgram(&first);
     freeProgram(&finalProg);
     freeMarks(&marks);
