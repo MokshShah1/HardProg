@@ -24,6 +24,11 @@ static void failNowFmt(const char *fmt, const char *arg)
     exit(1);
 }
 
+static uint64_t alignUp(uint64_t x, uint64_t a)
+{
+    return (x + (a - 1)) & ~(a - 1);
+}
+
 static char *dupText(const char *s)
 {
     size_t n = strlen(s);
@@ -710,6 +715,7 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
 
         if (beginsWith(p, ".code"))
         {
+            pc = alignUp(pc, 4);
             area = AREA_CODE;
             sawCode = true;
             addLine(outLines, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = AREA_CODE});
@@ -717,6 +723,7 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
         }
         if (beginsWith(p, ".data"))
         {
+            pc = alignUp(pc, 8);
             area = AREA_DATA;
             addLine(outLines, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = AREA_DATA});
             continue;
@@ -941,6 +948,14 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
 
         if (it->kind == LINE_DIR)
         {
+            if (it->dirArea == AREA_CODE)
+            {
+                pc = alignUp(pc, 4);
+            }
+            else if (it->dirArea == AREA_DATA)
+            {
+                pc = alignUp(pc, 8);
+            }
             addLine(&out, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = it->dirArea});
             continue;
         }
