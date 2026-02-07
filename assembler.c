@@ -6,7 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 
-#define BASE_ADDR 0ULL
+#define BASE_ADDR 0x1000ULL
 #define LD_MACRO_INSTRS 12
 #define LD_MACRO_BYTES (LD_MACRO_INSTRS * 4)
 
@@ -67,18 +67,6 @@ static const char *skipSpaces(const char *s)
 static bool beginsWith(const char *s, const char *prefix)
 {
     return strncmp(s, prefix, strlen(prefix)) == 0;
-}
-
-static bool isAllSpace(const char *s)
-{
-    for (const char *p = s; *p != '\0'; p++)
-    {
-        if (isspace((unsigned char)*p) == 0)
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 static void writeU32LE(FILE *f, uint32_t x)
@@ -210,10 +198,7 @@ static void freeWordList(WordList *w)
 
 static WordList splitWords(const char *line)
 {
-    WordList w;
-    w.words = NULL;
-    w.count = 0;
-
+    WordList w = {0};
     size_t cap = 8;
     w.words = (char **)malloc(sizeof(char *) * cap);
     if (w.words == NULL)
@@ -232,13 +217,11 @@ static WordList splitWords(const char *line)
         {
             break;
         }
-
         const char *start = p;
         while (*p != '\0' && isspace((unsigned char)*p) == 0 && *p != ',')
         {
             p++;
         }
-
         size_t len = (size_t)(p - start);
         char *token = (char *)malloc(len + 1);
         if (token == NULL)
@@ -259,7 +242,6 @@ static WordList splitWords(const char *line)
         }
         w.words[w.count++] = token;
     }
-
     return w;
 }
 
@@ -301,6 +283,19 @@ static void toSignedDecimal(const char *token, char *out, size_t outsz)
     snprintf(out, outsz, "%lld", v);
 }
 
+static int countCommas(const char *s)
+{
+    int c = 0;
+    for (const char *p = s; p != NULL && *p != '\0'; p++)
+    {
+        if (*p == ',')
+        {
+            c++;
+        }
+    }
+    return c;
+}
+
 typedef struct
 {
     char *name;
@@ -323,7 +318,6 @@ static void rememberMark(MarkTable *t, const char *name, uint64_t addr)
             failNowFmt("duplicate label: %s", name);
         }
     }
-
     if (t->count == t->cap)
     {
         t->cap = (t->cap != 0) ? (t->cap * 2) : 64;
@@ -333,7 +327,6 @@ static void rememberMark(MarkTable *t, const char *name, uint64_t addr)
             failNow("out of memory");
         }
     }
-
     t->items[t->count].name = dupText(name);
     t->items[t->count].addr = addr;
     t->count++;
@@ -373,6 +366,7 @@ typedef enum
 
 typedef enum
 {
+    LINE_DIR,
     LINE_INSTR,
     LINE_DATA,
     LINE_LD_MARK
@@ -382,6 +376,7 @@ typedef struct
 {
     LineKind kind;
     uint64_t addr;
+    Area dirArea;
     char *text;
     uint64_t data;
     int ldTarget;
@@ -535,6 +530,7 @@ static char *normalizeInstructionKeepMarks(const char *line)
     char *out = (char *)malloc(cap);
     if (out == NULL)
     {
+        freeWordList(&w);
         failNow("out of memory");
     }
     out[0] = '\0';
@@ -552,6 +548,7 @@ static char *normalizeInstructionKeepMarks(const char *line)
             out = (char *)realloc(out, cap);       \
             if (out == NULL)                       \
             {                                      \
+                freeWordList(&w);                  \
                 failNow("out of memory");          \
             }                                      \
         }                                          \
@@ -559,7 +556,6 @@ static char *normalizeInstructionKeepMarks(const char *line)
     } while (0)
 
     APPEND_TEXT(w.words[0]);
-
     for (int i = 1; i < w.count; i++)
     {
         if (i == 1)
@@ -589,17 +585,15 @@ static char *normalizeInstructionKeepMarks(const char *line)
             toUnsignedDecimal(tok, buf, sizeof(buf));
             emit = buf;
         }
-
         APPEND_TEXT(emit);
     }
 
 #undef APPEND_TEXT
-
     freeWordList(&w);
     return out;
 }
 
-static char *readLabelNameStrict(const char *line)
+static char *readLabelName(const char *line)
 {
     const char *p = skipSpaces(line);
     if (*p != ':')
@@ -607,19 +601,16 @@ static char *readLabelNameStrict(const char *line)
         failNow("internal: expected ':' label");
     }
     p++;
-
     p = skipSpaces(p);
     if (!(isalpha((unsigned char)*p) != 0 || *p == '_' || *p == '.'))
     {
         failNow("malformed label name");
     }
-
     const char *start = p;
     while (*p != '\0' && (isalnum((unsigned char)*p) != 0 || *p == '_' || *p == '.'))
     {
         p++;
     }
-
     size_t len = (size_t)(p - start);
     char *name = (char *)malloc(len + 1);
     if (name == NULL)
@@ -628,15 +619,59 @@ static char *readLabelNameStrict(const char *line)
     }
     memcpy(name, start, len);
     name[len] = '\0';
+    return name;
+}
 
-    const char *rest = skipSpaces(p);
-    if (*rest != '\0')
+static int expectedCommaCountForMnemonic(const char *mnemonic, int tokenCount)
+{
+    if (mnemonic == NULL)
     {
-        free(name);
-        failNow("malformed label line");
+        return -1;
     }
 
-    return name;
+    if (strcmp(mnemonic, "return") == 0 || strcmp(mnemonic, "halt") == 0)
+    {
+        return 0;
+    }
+    if (strcmp(mnemonic, "br") == 0 || strcmp(mnemonic, "brr") == 0 || strcmp(mnemonic, "call") == 0)
+    {
+        return 0;
+    }
+    if (strcmp(mnemonic, "not") == 0 || strcmp(mnemonic, "addi") == 0 || strcmp(mnemonic, "subi") == 0 || strcmp(mnemonic, "shftri") == 0 || strcmp(mnemonic, "shftli") == 0)
+    {
+        return 1;
+    }
+    if (strcmp(mnemonic, "brnz") == 0 || strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "in") == 0 || strcmp(mnemonic, "out") == 0 || strcmp(mnemonic, "clr") == 0 || strcmp(mnemonic, "push") == 0 || strcmp(mnemonic, "pop") == 0 || strcmp(mnemonic, "ld") == 0)
+    {
+        if (strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "brnz") == 0 || strcmp(mnemonic, "in") == 0 || strcmp(mnemonic, "out") == 0 || strcmp(mnemonic, "ld") == 0)
+        {
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(mnemonic, "priv") == 0)
+    {
+        return 3;
+    }
+    return 2;
+}
+
+static void enforceCommasForLine(const char *raw, const char *mnemonic, int tokenCount)
+{
+    if (raw == NULL || mnemonic == NULL)
+    {
+        return;
+    }
+    int expected = expectedCommaCountForMnemonic(mnemonic, tokenCount);
+    if (expected < 0)
+    {
+        return;
+    }
+    int found = countCommas(raw);
+    if (found != expected)
+    {
+        failNow("malformed operand separators");
+    }
 }
 
 static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *marks)
@@ -650,43 +685,37 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
     Area area = AREA_NONE;
     uint64_t pc = BASE_ADDR;
     bool sawCode = false;
-    bool sawData = false;
-
     char line[4096];
+
     while (fgets(line, sizeof(line), f) != NULL)
     {
         trimRight(line);
         cutLineAtSemicolon(line);
         trimRight(line);
 
-        if (line[0] == '\0' || isAllSpace(line) == true)
+        const char *p = line;
+        if (*p == '\0')
         {
             continue;
         }
-
-        const char *p = line;
 
         if (beginsWith(p, ".code"))
         {
             area = AREA_CODE;
             sawCode = true;
+            addLine(outLines, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = AREA_CODE});
             continue;
         }
-
         if (beginsWith(p, ".data"))
         {
             area = AREA_DATA;
-            sawData = true;
+            addLine(outLines, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = AREA_DATA});
             continue;
         }
 
         if (*p == ':')
         {
-            if (area == AREA_NONE)
-            {
-                failNow("label before any .code or .data directive");
-            }
-            char *name = readLabelNameStrict(p);
+            char *name = readLabelName(p);
             rememberMark(marks, name, pc);
             free(name);
             continue;
@@ -735,8 +764,8 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
         {
             *c = (char)tolower((unsigned char)*c);
         }
-
         const char *mn = w.words[0];
+        enforceCommasForLine(p, mn, w.count);
 
         if (strcmp(mn, "clr") == 0)
         {
@@ -849,37 +878,36 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
                 freeWordList(&w);
                 failNow("ld macro expects: ld rd, valueOrLabel");
             }
-
             int rd = readRegister(w.words[1]);
             if (rd < 0)
             {
                 freeWordList(&w);
                 failNow("ld: invalid register");
             }
-
             const char *rhs = w.words[2];
             if (rhs[0] == ':' && rhs[1] != '\0')
             {
-                addLine(outLines, (ProgramLine){.kind = LINE_LD_MARK, .addr = pc, .ldTarget = rd, .ldName = dupText(rhs + 1)});
+                addLine(outLines, (ProgramLine){
+                                      .kind = LINE_LD_MARK,
+                                      .addr = pc,
+                                      .ldTarget = rd,
+                                      .ldName = dupText(rhs + 1)});
                 pc += LD_MACRO_BYTES;
                 freeWordList(&w);
                 continue;
             }
-
             uint64_t imm = 0;
             if (readU64(rhs, &imm) == false)
             {
                 freeWordList(&w);
                 failNow("ld: invalid literal");
             }
-
             emitLoadMacro(outLines, &pc, rd, imm);
             freeWordList(&w);
             continue;
         }
 
         freeWordList(&w);
-
         char *clean = normalizeInstructionKeepMarks(p);
         addLine(outLines, (ProgramLine){.kind = LINE_INSTR, .addr = pc, .text = clean});
         pc += 4;
@@ -887,24 +915,26 @@ static void buildFirstPass(const char *inputPath, Program *outLines, MarkTable *
 
     fclose(f);
 
-    if (sawCode == false && sawData == false)
+    if (sawCode == false)
     {
-        failNow("program must have at least one .code or .data directive");
+        failNow("program must have at least one .code directive");
     }
 }
 
 static Program buildFinalProgram(const Program *first, const MarkTable *marks)
 {
-    Program out;
-    out.lines = NULL;
-    out.count = 0;
-    out.cap = 0;
-
+    Program out = {0};
     uint64_t pc = BASE_ADDR;
 
     for (size_t i = 0; i < first->count; i++)
     {
         const ProgramLine *it = &first->lines[i];
+
+        if (it->kind == LINE_DIR)
+        {
+            addLine(&out, (ProgramLine){.kind = LINE_DIR, .addr = pc, .dirArea = it->dirArea});
+            continue;
+        }
 
         if (it->kind == LINE_DATA)
         {
@@ -935,6 +965,8 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
         {
             *c = (char)tolower((unsigned char)*c);
         }
+
+        const char *mn = w.words[0];
 
         size_t cap = 128;
         char *s = (char *)malloc(cap);
@@ -982,7 +1014,26 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
             char buf[128];
             const char *emit = tok;
 
-            if (tok[0] == ':' && tok[1] != '\0')
+            if (strcmp(mn, "brr") == 0 && w.count == 2 && tok[0] == ':' && tok[1] != '\0')
+            {
+                uint64_t addr = 0;
+                if (lookupMark(marks, tok + 1, &addr) == false)
+                {
+                    freeWordList(&w);
+                    free(s);
+                    failNowFmt("undefined label reference: %s", tok + 1);
+                }
+                long long rel = (long long)((int64_t)addr - (int64_t)pc);
+                if (rel < -2048LL || rel > 2047LL)
+                {
+                    freeWordList(&w);
+                    free(s);
+                    failNow("brr label out of range for signed 12-bit");
+                }
+                snprintf(buf, sizeof(buf), "%lld", rel);
+                emit = buf;
+            }
+            else if (tok[0] == ':' && tok[1] != '\0')
             {
                 uint64_t addr = 0;
                 if (lookupMark(marks, tok + 1, &addr) == false)
@@ -1009,8 +1060,8 @@ static Program buildFinalProgram(const Program *first, const MarkTable *marks)
         }
 
 #undef APPEND_OUT
-
         freeWordList(&w);
+
         addLine(&out, (ProgramLine){.kind = LINE_INSTR, .addr = pc, .text = s});
         pc += 4;
     }
@@ -1048,6 +1099,7 @@ static uint32_t assembleOne(const char *instr)
     }
 
     const char *mn = w.words[0];
+
     int rd = -1;
     int rs = -1;
     int rt = -1;
@@ -1064,11 +1116,9 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("R-type expects 3 registers");
         }
-
         rd = readRegister(w.words[1]);
         rs = readRegister(w.words[2]);
         rt = readRegister(w.words[3]);
-
         if (rd < 0 || rs < 0 || rt < 0)
         {
             freeWordList(&w);
@@ -1076,7 +1126,6 @@ static uint32_t assembleOne(const char *instr)
         }
 
         uint32_t op = 0;
-
         if (strcmp(mn, "and") == 0)
         {
             op = 0x0;
@@ -1146,16 +1195,13 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("not expects 2 registers");
         }
-
         rd = readRegister(w.words[1]);
         rs = readRegister(w.words[2]);
-
         if (rd < 0 || rs < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         freeWordList(&w);
         return packR(0x3, (uint32_t)rd, (uint32_t)rs, 0);
     }
@@ -1167,14 +1213,12 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("I-type expects rd, imm");
         }
-
         rd = readRegister(w.words[1]);
         if (rd < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         if (readU12(w.words[2], &u12) == false)
         {
             freeWordList(&w);
@@ -1182,7 +1226,6 @@ static uint32_t assembleOne(const char *instr)
         }
 
         uint32_t op = 0;
-
         if (strcmp(mn, "addi") == 0)
         {
             op = 0x19;
@@ -1211,14 +1254,12 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("br expects rd");
         }
-
         rd = readRegister(w.words[1]);
         if (rd < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         freeWordList(&w);
         return packR(0x8, (uint32_t)rd, 0, 0);
     }
@@ -1230,20 +1271,17 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("brr expects rd or imm");
         }
-
         int r = readRegister(w.words[1]);
         if (r >= 0)
         {
             freeWordList(&w);
             return packR(0x9, (uint32_t)r, 0, 0);
         }
-
         if (readI12(w.words[1], &i12) == false)
         {
             freeWordList(&w);
             failNow("brr immediate must fit signed 12-bit");
         }
-
         uint32_t imm12 = (uint32_t)((int32_t)i12 & 0xFFF);
         freeWordList(&w);
         return ((0x0a & 0x1F) << 27) | (imm12 & 0xFFF);
@@ -1256,16 +1294,13 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("brnz expects rd, rs");
         }
-
         rd = readRegister(w.words[1]);
         rs = readRegister(w.words[2]);
-
         if (rd < 0 || rs < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         freeWordList(&w);
         return packR(0x0b, (uint32_t)rd, (uint32_t)rs, 0);
     }
@@ -1277,14 +1312,12 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("call expects rd");
         }
-
         rd = readRegister(w.words[1]);
         if (rd < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         freeWordList(&w);
         return packR(0x0c, (uint32_t)rd, 0, 0);
     }
@@ -1296,7 +1329,6 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("return expects no operands");
         }
-
         freeWordList(&w);
         return ((0x0d & 0x1F) << 27);
     }
@@ -1308,17 +1340,14 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("brgt expects rd, rs, rt");
         }
-
         rd = readRegister(w.words[1]);
         rs = readRegister(w.words[2]);
         rt = readRegister(w.words[3]);
-
         if (rd < 0 || rs < 0 || rt < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         freeWordList(&w);
         return packR(0x0e, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt);
     }
@@ -1330,23 +1359,19 @@ static uint32_t assembleOne(const char *instr)
             freeWordList(&w);
             failNow("priv expects rd, rs, rt, imm");
         }
-
         rd = readRegister(w.words[1]);
         rs = readRegister(w.words[2]);
         rt = readRegister(w.words[3]);
-
         if (rd < 0 || rs < 0 || rt < 0)
         {
             freeWordList(&w);
             failNow("invalid register");
         }
-
         if (readU12(w.words[4], &u12) == false)
         {
             freeWordList(&w);
             failNow("priv imm must be 0..4095");
         }
-
         freeWordList(&w);
         return packPriv(0x0f, (uint32_t)rd, (uint32_t)rs, (uint32_t)rt, u12);
     }
@@ -1365,9 +1390,7 @@ static uint32_t assembleOne(const char *instr)
         if (a[0] == '(')
         {
             const char *p = a + 1;
-
-            char regbuf[16];
-            memset(regbuf, 0, sizeof(regbuf));
+            char regbuf[16] = {0};
             int k = 0;
 
             while (*p != '\0' && *p != ')' && k < 15)
@@ -1390,10 +1413,8 @@ static uint32_t assembleOne(const char *instr)
             }
             p++;
 
-            char immbuf[32];
-            memset(immbuf, 0, sizeof(immbuf));
+            char immbuf[32] = {0};
             k = 0;
-
             while (*p != '\0' && *p != ')' && k < 31)
             {
                 immbuf[k++] = *p++;
@@ -1414,7 +1435,6 @@ static uint32_t assembleOne(const char *instr)
                 freeWordList(&w);
                 failNow("mov store: invalid base reg");
             }
-
             if (readI12(immbuf, &imm) == false)
             {
                 freeWordList(&w);
@@ -1442,9 +1462,7 @@ static uint32_t assembleOne(const char *instr)
             }
 
             const char *p = b + 1;
-
-            char regbuf[16];
-            memset(regbuf, 0, sizeof(regbuf));
+            char regbuf[16] = {0};
             int k = 0;
 
             while (*p != '\0' && *p != ')' && k < 15)
@@ -1467,10 +1485,8 @@ static uint32_t assembleOne(const char *instr)
             }
             p++;
 
-            char immbuf[32];
-            memset(immbuf, 0, sizeof(immbuf));
+            char immbuf[32] = {0};
             k = 0;
-
             while (*p != '\0' && *p != ')' && k < 31)
             {
                 immbuf[k++] = *p++;
@@ -1491,7 +1507,6 @@ static uint32_t assembleOne(const char *instr)
                 freeWordList(&w);
                 failNow("mov load: invalid base reg");
             }
-
             if (readI12(immbuf, &imm) == false)
             {
                 freeWordList(&w);
@@ -1539,31 +1554,28 @@ static void writeIntermediateFile(const char *path, const Program *prog)
         failNowFmt("cannot open intermediate file: %s", path);
     }
 
-    Area last = AREA_NONE;
-
     for (size_t i = 0; i < prog->count; i++)
     {
         const ProgramLine *it = &prog->lines[i];
-        Area cur = (it->kind == LINE_DATA) ? AREA_DATA : AREA_CODE;
 
-        if (cur != last)
+        if (it->kind == LINE_DIR)
         {
-            if (cur == AREA_CODE)
+            if (it->dirArea == AREA_CODE)
             {
                 fprintf(f, ".code\n");
             }
-            else
+            else if (it->dirArea == AREA_DATA)
             {
                 fprintf(f, ".data\n");
             }
-            last = cur;
+            continue;
         }
 
         if (it->kind == LINE_DATA)
         {
             fprintf(f, "\t%llu\n", (unsigned long long)it->data);
         }
-        else
+        else if (it->kind == LINE_INSTR)
         {
             fprintf(f, "\t%s\n", it->text);
         }
@@ -1583,11 +1595,17 @@ static void writeBinaryFile(const char *path, const Program *prog)
     for (size_t i = 0; i < prog->count; i++)
     {
         const ProgramLine *it = &prog->lines[i];
+
+        if (it->kind == LINE_DIR)
+        {
+            continue;
+        }
+
         if (it->kind == LINE_DATA)
         {
             writeU64LE(f, it->data);
         }
-        else
+        else if (it->kind == LINE_INSTR)
         {
             uint32_t word = assembleOne(it->text);
             writeU32LE(f, word);
@@ -1609,15 +1627,8 @@ int main(int argc, char **argv)
     const char *intermediatePath = argv[2];
     const char *binaryPath = argv[3];
 
-    Program first;
-    first.lines = NULL;
-    first.count = 0;
-    first.cap = 0;
-
-    MarkTable marks;
-    marks.items = NULL;
-    marks.count = 0;
-    marks.cap = 0;
+    Program first = {0};
+    MarkTable marks = {0};
 
     buildFirstPass(inputPath, &first, &marks);
     Program finalProg = buildFinalProgram(&first, &marks);
